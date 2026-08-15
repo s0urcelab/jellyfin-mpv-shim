@@ -20,7 +20,18 @@ than pick one spelling and silently read nothing, :func:`keys_for` returns
 the candidates in priority order and the reader takes the first that exists.
 A write goes back to whichever key it was read from, so we never strand the
 user's setting under a name their web client will not look at.
+
+**Sort is two spellings, not one.** Modern jellyfin-web
+(``userSettings.saveQuerySettings``) stores a JSON blob
+``{"SortBy":"…","SortOrder":"…"}`` on the view key itself
+(``items-<parentId>-Movie``). Legacy ``list.js`` stores two string keys
+(``…-sortby`` / ``…-sortorder``). Both are server-side; filters are the
+ones web kept in localStorage. The DTO's own ``SortBy`` field is a
+different store -- one value for the whole ``usersettings`` document --
+and is not how a library remembers its order.
 """
+
+import json
 
 #: Image types jellyfin-web offers per library view, and what each means for
 #: the grid: ``(geometry attribute, image type requested)``.
@@ -144,6 +155,21 @@ def resolve_view_type(custom_prefs, parent_id, collection_type):
     return GRID_VIEW, None
 
 
+def view_keys_for(parent_id, collection_type):
+    """The view key with no setting suffix -- ``items-<parentId>-Movie``,
+    then the bare ``items-<parentId>``.
+
+    Modern web's sort JSON lives on this key. ``keys_for`` is this plus
+    ``-<setting>``.
+    """
+    if not parent_id:
+        return []
+    out = ["items-%s-%s" % (parent_id, route_type)
+           for route_type in _ROUTE_TYPES.get(collection_type or "", ())]
+    out.append("items-%s" % parent_id)
+    return out
+
+
 def keys_for(parent_id, collection_type, setting="imageType"):
     """CustomPrefs keys that might hold ``setting`` for this library, best
     first.
@@ -152,12 +178,8 @@ def keys_for(parent_id, collection_type, setting="imageType"):
     typed key is more specific, and web writes one whenever the route it was
     on had a type. Reading the bare key first would shadow a real setting.
     """
-    if not parent_id:
-        return []
-    out = ["items-%s-%s-%s" % (parent_id, route_type, setting)
-           for route_type in _ROUTE_TYPES.get(collection_type or "", ())]
-    out.append("items-%s-%s" % (parent_id, setting))
-    return out
+    return ["%s-%s" % (base, setting)
+            for base in view_keys_for(parent_id, collection_type)]
 
 
 def resolve_image_type(custom_prefs, parent_id, collection_type):
@@ -180,3 +202,111 @@ def shape_for(image_type):
     """``(geometry attribute, image type)`` for a stored value, or ``None``
     to leave the grid shaped by its artwork."""
     return IMAGE_TYPES.get((image_type or "").strip().lower())
+
+
+def primary_sort_by(sort_by):
+    """The field a stored SortBy actually sorts on.
+
+    Web sometimes writes a comma list (``DateCreated,SortName``) so ties
+    fall back to name. Our dropdown is one field; matching must look at
+    the first, or a stored Date Added would miss the menu entry and the
+    grid would come up in name order with the setting still on the server.
+    """
+    return str(sort_by or "").split(",")[0].strip()
+
+
+def _as_sort_order(raw):
+    """Anything other than Descending is Ascending -- web's own rule
+    (``getSortValuesLegacy``)."""
+    return ("Descending" if str(raw or "").strip().lower() == "descending"
+            else "Ascending")
+
+
+def _parse_sort_json(raw):
+    """``(sort_by, sort_order)`` from web's saveQuerySettings blob, or
+    None if this is not that blob.
+
+    The view key is also a place nothing else of ours writes, but a
+    non-JSON string (or JSON without SortBy) must not be treated as a
+    sort -- that would both apply nothing useful and later overwrite
+    whatever the string actually was.
+    """
+    if raw is None or raw == "":
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    sort_by = primary_sort_by(data.get("SortBy"))
+    if not sort_by:
+        return None
+    return sort_by, _as_sort_order(data.get("SortOrder"))
+
+
+def _is_legacy_sortby_key(key):
+    return str(key or "").lower().endswith("-sortby")
+
+
+def _legacy_order_key(sortby_key):
+    """``…-sortby`` -> ``…-sortorder``, preserving the suffix's case so a
+    write lands next to the key we read."""
+    key = sortby_key or ""
+    lower = key.lower()
+    if lower.endswith("-sortby"):
+        return key[:-len("-sortby")] + (
+            "-sortorder" if key.endswith("-sortby") else "-SortOrder")
+    return key + "-sortorder"
+
+
+def resolve_sort(custom_prefs, parent_id, collection_type):
+    """``((sort_by, sort_order), key)`` for this library's saved sort.
+
+    ``key`` is the CustomPrefs entry a later save should write -- the JSON
+    view key, or the legacy ``-sortby`` key. ``None`` means nothing was
+    stored, and a write should use the first view key as JSON (what current
+    web writes).
+
+    JSON on a typed view key wins over a leftover ``-sortby`` on the same
+    view: that is the spelling current web reads, and writing the other
+    one would leave web still showing the old order.
+    """
+    prefs = custom_prefs or {}
+    for key in view_keys_for(parent_id, collection_type):
+        parsed = _parse_sort_json(prefs.get(key))
+        if parsed is not None:
+            return parsed, key
+    for key in keys_for(parent_id, collection_type, "sortby"):
+        raw = prefs.get(key)
+        if raw is None or raw == "":
+            continue
+        sort_by = primary_sort_by(raw)
+        if not sort_by:
+            continue
+        order_raw = prefs.get(_legacy_order_key(key))
+        return (sort_by, _as_sort_order(order_raw)), key
+    return (None, None), None
+
+
+def encode_sort(value, key, parent_id, collection_type):
+    """CustomPrefs keys to write for a sort change.
+
+    ``value`` is ``(sort_by, sort_order)``. A legacy ``-sortby`` key is
+    written as two strings; everything else (including a first save) is
+    web's JSON on the view key.
+    """
+    sort_by, sort_order = value
+    sort_by = primary_sort_by(sort_by)
+    sort_order = _as_sort_order(sort_order)
+    if not sort_by:
+        return {}
+    if key and _is_legacy_sortby_key(key):
+        return {key: sort_by, _legacy_order_key(key): sort_order}
+    if not key:
+        keys = view_keys_for(parent_id, collection_type)
+        if not keys:
+            return {}
+        key = keys[0]
+    return {key: json.dumps({"SortBy": sort_by, "SortOrder": sort_order},
+                            separators=(",", ":"))}

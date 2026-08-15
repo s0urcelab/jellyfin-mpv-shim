@@ -765,9 +765,10 @@ class LibrarySource:
     def get_view_settings(self, server_uuid, parent_id, collection_type):
         """``{setting: (value, key)}`` for a library's saved view settings.
 
-        All four in one read, because they live in one document -- and the
-        key each came from rides along so a save lands where the user's web
-        client will look for it (see ``view_prefs``).
+        Image type, list/grid, the two caption flags, and the sort -- one
+        read, because they live in one document -- and the key each came
+        from rides along so a save lands where the user's web client will
+        look for it (see ``view_prefs``).
         """
         try:
             custom = self._display_prefs_custom(server_uuid)
@@ -778,6 +779,8 @@ class LibrarySource:
             "imageType": view_prefs.resolve_image_type(
                 custom, parent_id, collection_type),
             "viewType": view_prefs.resolve_view_type(
+                custom, parent_id, collection_type),
+            "sort": view_prefs.resolve_sort(
                 custom, parent_id, collection_type),
         }
         for setting in view_prefs.BOOL_SETTINGS:
@@ -812,19 +815,30 @@ class LibrarySource:
         Booleans go out as ``"true"``/``"false"`` strings for the reason
         every other boolean in this document does: web compares them as
         strings, so a JSON boolean reads there as false.
+
+        ``sort`` is ``(sort_by, sort_order)`` and is encoded by
+        ``view_prefs.encode_sort`` -- JSON on the view key, or the legacy
+        pair of strings if that is what was read.
         """
         api = self._conn(server_uuid).api
-        if not key:
-            candidates = view_prefs.keys_for(parent_id, collection_type,
-                                             setting)
-            if not candidates:
-                return
-            key = candidates[0]
-        if isinstance(value, bool):
-            value = "true" if value else "false"
         dto = self._display_prefs_dto(api)
         custom = dict(dto.get("CustomPrefs") or {})
-        custom[key] = value
+        if setting == "sort":
+            writes = view_prefs.encode_sort(
+                value, key, parent_id, collection_type)
+            if not writes:
+                return
+            custom.update(writes)
+        else:
+            if not key:
+                candidates = view_prefs.keys_for(parent_id, collection_type,
+                                                 setting)
+                if not candidates:
+                    return
+                key = candidates[0]
+            if isinstance(value, bool):
+                value = "true" if value else "false"
+            custom[key] = value
         dto["CustomPrefs"] = custom
         api.update_user_settings(dto,
                                  client=home_sections.DISPLAY_PREFS_CLIENT)

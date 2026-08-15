@@ -148,7 +148,6 @@ class GridPage(Page):
         invalidate = self.ctx.invalidate
         srv = route.get("server") or self.ctx.server
         parent = route["parent_id"]
-        _n, sort_by, sort_order = self._sorts()[route.get("_sort", 0)]
         filters = route.get("_filters") or {}
         collections = bool(route.get("_collections"))
         ctype = route.get("collection_type")
@@ -166,11 +165,24 @@ class GridPage(Page):
             # in flight, and the server would answer with the value the user
             # just changed away from -- fetching the wrong tags and drawing
             # the grid back the way it was. Only a first load asks.
+            #
+            # Sort is in the same document, and the same rule applies: a
+            # dropdown change already wrote ``_sort`` (and the Latest
+            # "see all" heading arrives with Date Added already named).
+            # Only a first open of the library restores from what is stored.
             view = route.get("_view")
             if view is None:
                 get_view = getattr(source, "get_view_settings", None)
                 view = (get_view(srv, parent, ctype)
                         if get_view else dict(_DEFAULT_VIEW))
+            if "_sort" in route:
+                sort_idx = route["_sort"]
+            else:
+                sort_idx = self._sort_index_from_view(view)
+            sorts = self._sorts()
+            if not (0 <= sort_idx < len(sorts)):
+                sort_idx = 0
+            _n, sort_by, sort_order = sorts[sort_idx]
             image_type = _image_type_of(view)
             if collections:
                 # Collections are server-wide and recursive (a BoxSet
@@ -199,7 +211,7 @@ class GridPage(Page):
             # just left. One job rather than two, so nothing is submitted to
             # the pool from inside a pool worker.
             if run.epoch == epoch:
-                self._install(items, total, view, sort_by)
+                self._install(items, total, view, sort_by, sort_idx)
                 invalidate()
             vals = route.get("_filtervals")
             if vals is None:
@@ -209,16 +221,16 @@ class GridPage(Page):
                 except Exception:
                     log.debug("filter values unavailable", exc_info=True)
                     vals = {"genres": [], "years": []}
-            return items, total, vals, view
+            return items, total, vals, view, sort_by, sort_idx
 
         def done(res):
-            items, total, vals, view = res
+            items, total, vals, view, sort_by, sort_idx = res
             route["_filtervals"] = vals
-            self._install(items, total, view, sort_by)
+            self._install(items, total, view, sort_by, sort_idx)
 
         self.route_async(work, done, epoch)
 
-    def _install(self, items, total, view, sort_by):
+    def _install(self, items, total, view, sort_by, sort_idx=None):
         """Publish a loaded page onto the route. Called twice -- once when
         the items land and once when the whole job does -- so it must stay
         idempotent."""
@@ -233,6 +245,11 @@ class GridPage(Page):
         # would be left disagreeing with what is stored.
         if route.get("_view") is None:
             route["_view"] = view
+        # Same rule for the sort index: a first load restores it from the
+        # view settings, and a dropdown change already wrote ``_sort``.
+        # ``0`` is Name, so the test is "in", not truthiness.
+        if "_sort" not in route and sort_idx is not None:
+            route["_sort"] = sort_idx
         # Random reshuffles server-side on every request, so page two is
         # drawn from a different ordering than page one: paging it yields
         # duplicates and silently skips items. Reporting the first page as
@@ -538,6 +555,24 @@ class GridPage(Page):
         see EXTRA_SORTS -- and a route's stored ``_sort`` is an index into
         whichever list its own screen offers."""
         return sorts_for(self.route.get("collection_type"))
+
+    def _sort_index_from_view(self, view):
+        """Map a stored ``(sort_by, sort_order)`` onto this screen's menu.
+
+        Match on the field, not the index: TV appends an extra entry, and
+        a stored DateLastContentAdded on a movie library has nowhere to
+        land. Unknown or absent -> Name, which is also the untouched
+        default, so an old client that never wrote a sort is unchanged.
+        """
+        stored = (view or {}).get("sort")
+        pair = stored[0] if stored else None
+        primary = view_prefs.primary_sort_by(pair[0] if pair else None)
+        if not primary:
+            return 0
+        for i, (_n, by, _order) in enumerate(self._sorts()):
+            if by == primary:
+                return i
+        return 0
 
     def _bound_query(self):
         """``(sort_by, sort_order, filters, person, srv, image_type,
@@ -1102,8 +1137,54 @@ class GridPage(Page):
         self.ctx.nav.reload(route)
 
     def _set(self, key, value):
+        previous = self.route.get(key)
         self.route[key] = value
+        if key == "_sort":
+            self._persist_sort(value, previous)
         self._reload()
+
+    def _persist_sort(self, index, previous):
+        """Write the chosen sort to DisplayPreferences.
+
+        Library grids only. A filmography and a genre listing share the
+        dropdown but are not a library view -- their parent is not the
+        key web would look at, and writing there would retarget some
+        other screen's stored order. Optimistic, like ``_set_view``: the
+        grid already shows the new order and rolls back if the server
+        refuses.
+        """
+        if self.kind != "grid":
+            return
+        sorts = self._sorts()
+        if not (0 <= index < len(sorts)):
+            return
+        _n, sort_by, sort_order = sorts[index]
+        route = self.route
+        view = dict(route.get("_view") or _DEFAULT_VIEW)
+        previous_pair, key = view.get("sort") or ((None, None), None)
+        view["sort"] = ((sort_by, sort_order), key)
+        route["_view"] = view
+        save = getattr(self.ctx.source, "save_view_setting", None)
+        if save is None:
+            return
+        server = route.get("server") or self.ctx.server
+        parent = route.get("parent_id")
+        ctype = route.get("collection_type")
+
+        def work():
+            save(server, parent, ctype, "sort", (sort_by, sort_order),
+                 key=key)
+
+        def failed(_exc):
+            rolled = dict(route.get("_view") or {})
+            rolled["sort"] = (previous_pair, key)
+            route["_view"] = rolled
+            route["_sort"] = previous if previous is not None else 0
+            self.ctx.status(_("That view setting could not be saved."))
+            self._reload()
+
+        self.ctx.run.run(work, lambda _r: None, self.ctx.run.epoch,
+                         on_error=failed)
 
     def _set_filter(self, key, value):
         self.route.setdefault("_filters", {})[key] = value

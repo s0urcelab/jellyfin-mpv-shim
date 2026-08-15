@@ -236,6 +236,132 @@ class TvSortTest(unittest.TestCase):
                          ["DateLastContentAdded"])
 
 
+class SavedSortTest(unittest.TestCase):
+    """A library remembers its sort in DisplayPreferences, like web.
+
+    The dropdown used to write only the current route, so leaving and
+    coming back always landed on Name. Restore from the view settings on
+    a first open; persist SortBy/SortOrder strings, not the menu index
+    (TV appends an extra entry).
+    """
+
+    def _grid(self, ctype="movies", **settings):
+        src = FakeSource()
+        src.view_settings = {k: (v if isinstance(v, tuple) else (v, None))
+                             for k, v in settings.items()}
+        b = MpvtkBrowser(app=None, source=src, controller=FakeController())
+        b._pool = _SyncPool()
+        b.server = "srv1"
+        b.navigate({"kind": "grid", "server": "srv1", "parent_id": "lib1",
+                    "collection_type": ctype, "title": "L"})
+        return b, src
+
+    def test_a_stored_date_added_comes_back_on_a_fresh_open(self):
+        b, src = self._grid(
+            sort=(("DateCreated", "Descending"), "items-lib1-Movie"))
+        self.assertEqual(b.route["_sort"], 1)
+        self.assertEqual((src.queries[-1]["sort_by"],
+                          src.queries[-1]["sort_order"]),
+                         ("DateCreated", "Descending"))
+
+    def test_reopening_the_library_does_not_fall_back_to_name(self):
+        """The original bug: the choice lived on the route, and a new
+        navigate built a route without ``_sort``."""
+        settings = {"sort": (("DateCreated", "Descending"),
+                             "items-lib1-Movie")}
+        b, src = self._grid(**settings)
+        b.navigate({"kind": "grid", "server": "srv1", "parent_id": "lib1",
+                    "collection_type": "movies", "title": "L"})
+        self.assertEqual(b.route["_sort"], 1)
+        self.assertEqual(src.queries[-1]["sort_by"], "DateCreated")
+
+    def test_choosing_date_added_writes_the_strings_not_the_index(self):
+        b, src = self._grid()
+        b._page_for(b.route)._set("_sort", 1)
+        self.assertEqual(src.saved_view_settings[-1][1:3],
+                         ("sort", ("DateCreated", "Descending")))
+
+    def test_a_first_save_lands_on_the_key_it_was_read_from(self):
+        b, src = self._grid(
+            sort=(("SortName", "Ascending"), "items-lib1-Movie"))
+        b._page_for(b.route)._set("_sort", 1)
+        self.assertEqual(src.saved_view_settings[-1][3], "items-lib1-Movie")
+
+    def test_see_all_latest_is_not_overwritten_by_a_stored_name(self):
+        """The heading arrives with Date Added already named -- that is
+        the row's destination, not a restore."""
+        src = FakeSource()
+        src.view_settings = {
+            "sort": (("SortName", "Ascending"), "items-lib1-Movie")}
+        b = MpvtkBrowser(app=None, source=src, controller=FakeController())
+        b._pool = _SyncPool()
+        b.server = "srv1"
+        b.navigate({"kind": "grid", "server": "srv1", "parent_id": "lib1",
+                    "collection_type": "movies", "title": "Latest",
+                    "_sort": 1})
+        self.assertEqual(b.route["_sort"], 1)
+        self.assertEqual(src.queries[-1]["sort_by"], "DateCreated")
+
+    def test_an_unknown_stored_sort_falls_back_to_name(self):
+        b, src = self._grid(
+            sort=(("NotASort", "Descending"), "items-lib1-Movie"))
+        self.assertEqual(b.route.get("_sort", 0), 0)
+        self.assertEqual(src.queries[-1]["sort_by"], "SortName")
+
+    def test_a_tv_library_restores_date_episode_added(self):
+        b, src = self._grid(
+            "tvshows",
+            sort=(("DateLastContentAdded", "Descending"),
+                  "items-lib1-Series"))
+        from jellyfin_mpv_shim.mpvtk_browser.pages.grid import sorts_for
+        labels = [s[0] for s in sorts_for("tvshows")]
+        self.assertEqual(b.route["_sort"],
+                         labels.index("Date Episode Added"))
+        self.assertEqual(src.queries[-1]["sort_by"], "DateLastContentAdded")
+
+    def test_a_rejected_save_rolls_the_sort_back(self):
+        b, src = self._grid()
+        src.save_view_fails = True
+        b._page_for(b.route)._set("_sort", 1)
+        self.assertEqual(b.route["_sort"], 0)
+        self.assertEqual(src.queries[-1]["sort_by"], "SortName")
+
+
+class LibrarySourceSortTest(unittest.TestCase):
+    """The live source must encode sort the way web stores it, and must
+    not drop the rest of the DisplayPreferences document on a write."""
+
+    def test_get_view_settings_includes_sort(self):
+        src = LibrarySource.__new__(LibrarySource)
+        src._display_prefs_custom = lambda _uuid, refresh=False: {
+            "items-PID-Movie":
+            '{"SortBy":"DateCreated","SortOrder":"Descending"}'}
+        got = src.get_view_settings("srv", "PID", "movies")
+        self.assertEqual(got["sort"],
+                         (("DateCreated", "Descending"), "items-PID-Movie"))
+
+    def test_save_writes_json_and_keeps_the_rest_of_the_document(self):
+        written = {}
+
+        class Api:
+            def get_user_settings(self, client=None):
+                return {"CustomPrefs": {"homesection0": "resume"}}
+
+            def update_user_settings(self, dto, client=None):
+                written.update(dto)
+
+        src = LibrarySource.__new__(LibrarySource)
+        src._conn = lambda _uuid: type("C", (), {"api": Api()})()
+        src._custom_prefs = {}
+        src.save_view_setting("srv", "PID", "movies", "sort",
+                              ("DateCreated", "Descending"))
+        custom = written["CustomPrefs"]
+        self.assertEqual(custom["homesection0"], "resume")
+        self.assertEqual(
+            custom["items-PID-Movie"],
+            '{"SortBy":"DateCreated","SortOrder":"Descending"}')
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -122,5 +122,128 @@ class ShapeTest(unittest.TestCase):
         self.assertIsNone(view_prefs.shape_for(None))
 
 
+class ViewKeyTest(unittest.TestCase):
+    def test_the_typed_view_key_is_first(self):
+        self.assertEqual(view_prefs.view_keys_for("PID", "movies")[0],
+                         "items-PID-Movie")
+
+    def test_keys_for_is_the_view_key_plus_the_setting(self):
+        self.assertEqual(view_prefs.keys_for("PID", "movies", "imageType"),
+                         ["items-PID-Movie-imageType", "items-PID-imageType"])
+
+
+class ResolveSortTest(unittest.TestCase):
+    """Per-library sort, shared with jellyfin-web.
+
+    Two spellings: modern JSON on the view key, and legacy -sortby /
+    -sortorder strings. JSON wins, because that is what current web reads.
+    """
+
+    def test_an_untouched_library_has_nothing_stored(self):
+        pair, key = view_prefs.resolve_sort({}, "PID", "movies")
+        self.assertEqual(pair, (None, None))
+        self.assertIsNone(key)
+
+    def test_modern_json_on_the_typed_key(self):
+        pair, key = view_prefs.resolve_sort(
+            {"items-PID-Movie":
+             '{"SortBy":"DateCreated","SortOrder":"Descending"}'},
+            "PID", "movies")
+        self.assertEqual(pair, ("DateCreated", "Descending"))
+        self.assertEqual(key, "items-PID-Movie")
+
+    def test_a_typed_key_wins_over_the_bare_one(self):
+        pair, _k = view_prefs.resolve_sort(
+            {"items-PID-Movie":
+             '{"SortBy":"DateCreated","SortOrder":"Descending"}',
+             "items-PID":
+             '{"SortBy":"SortName","SortOrder":"Ascending"}'},
+            "PID", "movies")
+        self.assertEqual(pair, ("DateCreated", "Descending"))
+
+    def test_legacy_sortby_is_read(self):
+        pair, key = view_prefs.resolve_sort(
+            {"items-PID-Movie-sortby": "PremiereDate",
+             "items-PID-Movie-sortorder": "Descending"},
+            "PID", "movies")
+        self.assertEqual(pair, ("PremiereDate", "Descending"))
+        self.assertEqual(key, "items-PID-Movie-sortby")
+
+    def test_json_wins_over_legacy_on_the_same_view(self):
+        """Current web reads the JSON. Writing the leftover -sortby
+        instead would leave web still showing the old order."""
+        pair, key = view_prefs.resolve_sort(
+            {"items-PID-Movie":
+             '{"SortBy":"DateCreated","SortOrder":"Descending"}',
+             "items-PID-Movie-sortby": "SortName",
+             "items-PID-Movie-sortorder": "Ascending"},
+            "PID", "movies")
+        self.assertEqual(pair, ("DateCreated", "Descending"))
+        self.assertEqual(key, "items-PID-Movie")
+
+    def test_a_comma_list_keeps_the_first_field(self):
+        pair, _k = view_prefs.resolve_sort(
+            {"items-PID-Movie":
+             '{"SortBy":"DateCreated,SortName","SortOrder":"Descending"}'},
+            "PID", "movies")
+        self.assertEqual(pair[0], "DateCreated")
+
+    def test_junk_json_is_ignored(self):
+        pair, key = view_prefs.resolve_sort(
+            {"items-PID-Movie": "thumb"}, "PID", "movies")
+        self.assertEqual(pair, (None, None))
+        self.assertIsNone(key)
+
+    def test_empty_sortby_is_ignored(self):
+        pair, key = view_prefs.resolve_sort(
+            {"items-PID-Movie-sortby": ""}, "PID", "movies")
+        self.assertEqual(pair, (None, None))
+        self.assertIsNone(key)
+
+    def test_anything_but_descending_is_ascending(self):
+        pair, _k = view_prefs.resolve_sort(
+            {"items-PID-Movie-sortby": "SortName",
+             "items-PID-Movie-sortorder": "Desending"},
+            "PID", "movies")
+        self.assertEqual(pair[1], "Ascending")
+
+    def test_legacy_without_an_order_defaults_to_ascending(self):
+        pair, _k = view_prefs.resolve_sort(
+            {"items-PID-Movie-sortby": "SortName"}, "PID", "movies")
+        self.assertEqual(pair, ("SortName", "Ascending"))
+
+
+class EncodeSortTest(unittest.TestCase):
+    def test_a_first_save_is_json_on_the_typed_view_key(self):
+        """What current web writes. Inventing a -sortby key would leave
+        web still reading nothing."""
+        writes = view_prefs.encode_sort(
+            ("DateCreated", "Descending"), None, "PID", "movies")
+        self.assertEqual(writes, {
+            "items-PID-Movie":
+            '{"SortBy":"DateCreated","SortOrder":"Descending"}'})
+
+    def test_a_legacy_key_is_written_as_two_strings(self):
+        writes = view_prefs.encode_sort(
+            ("PremiereDate", "Descending"),
+            "items-PID-Movie-sortby", "PID", "movies")
+        self.assertEqual(writes, {
+            "items-PID-Movie-sortby": "PremiereDate",
+            "items-PID-Movie-sortorder": "Descending"})
+
+    def test_a_json_key_is_written_back_as_json(self):
+        writes = view_prefs.encode_sort(
+            ("CommunityRating", "Descending"),
+            "items-PID-Movie", "PID", "movies")
+        self.assertEqual(writes["items-PID-Movie"],
+                         '{"SortBy":"CommunityRating","SortOrder":"Descending"}')
+
+    def test_no_parent_writes_nothing(self):
+        self.assertEqual(
+            view_prefs.encode_sort(("SortName", "Ascending"), None,
+                                   None, "movies"),
+            {})
+
+
 if __name__ == "__main__":
     unittest.main()

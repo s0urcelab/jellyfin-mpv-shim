@@ -900,6 +900,17 @@ class TestDetailActions(unittest.TestCase):
         self.assertEqual(self.b.source.person_sorts[-1],
                          ("PremiereDate", "Descending"))
 
+    def test_a_filmography_sort_is_not_written_as_a_library_view(self):
+        """Person routes share GridPage._set. Persisting against parent_id
+        would retarget some library's stored order -- and a filmography
+        has no library parent to begin with."""
+        self.b._open_item({"Id": "pp1", "Name": "Actor", "Type": "Actor"})
+        _nodes, h = build_scene(self.b)
+        from jellyfin_mpv_shim.mpvtk_browser.views import SORTS
+        want = next(i for i, s in enumerate(SORTS) if s[1] == "PremiereDate")
+        h["person-sort"]["select"](want, SORTS[want][0])
+        self.assertFalse(getattr(self.b.source, "saved_view_settings", []))
+
     def test_a_filmography_defaults_to_name(self):
         self.b._open_item({"Id": "pp1", "Name": "Actor", "Type": "Actor"})
         self.assertEqual(self.b.source.person_sorts[-1],
