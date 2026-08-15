@@ -25,6 +25,7 @@ _METRICS_VERSION = 1
 
 # Candidates per platform; Pillow searches the system font paths.
 _CANDIDATES = [
+    "msyh.ttc",
     "DejaVuSans.ttf",  # Linux (and the demo's poster font)
     "segoeui.ttf",  # Windows
     "arial.ttf",
