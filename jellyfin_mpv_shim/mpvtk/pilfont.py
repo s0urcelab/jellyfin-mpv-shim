@@ -30,6 +30,8 @@ _CANDIDATES = {
         "arial.ttf",
     ],
     "cjk": [
+        "msyh.ttc",
+        "msyhbd.ttc",
         "NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
@@ -66,7 +68,7 @@ _BOLD = {
     "latin": ["DejaVuSans-Bold.ttf",
               "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
               "NotoSans-Bold.ttf", "arialbd.ttf"],
-    "cjk": ["NotoSansCJK-Bold.ttc",
+    "cjk": ["msyh.ttc", "msyhbd.ttc", "NotoSansCJK-Bold.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"],
 }
 
